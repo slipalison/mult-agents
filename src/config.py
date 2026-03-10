@@ -45,7 +45,8 @@ class Config:
     #   - Apesar do tamanho menor, supera modelos gerais maiores em codigo
     #   - Juntos os dois usam ~11GB — cabem simultaneamente na RTX 4090
     planner_model: str = "qwen3.5:9b"
-    coder_model: str = "qwen2.5-coder:7b"
+    coder_model: str = "qwen2.5-coder:32b"
+    # coder_model: str = "qwen2.5-coder:7b"
     reviewer_model: str = "qwen3.5:9b"
 
     # Numero maximo de vezes que o Reviewer pode reprovar e devolver ao Coder.

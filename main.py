@@ -84,6 +84,7 @@ def main() -> None:
         "generated_files": [],
         "review": None,
         "review_iterations": 0,
+        "project_dir": None,
         "messages": [],
     })
 
@@ -92,8 +93,9 @@ def main() -> None:
         print_error("Nenhum arquivo foi gerado. Verifique os logs acima.")
         sys.exit(1)
 
-    # Reconstroi os paths a partir dos generated_files (ja escritos pelo writer node)
-    created_paths = [Path(config.output_dir) / f["filename"] for f in generated]
+    # Reconstroi os paths usando o diretorio do projeto definido pelo writer node.
+    project_dir   = result.get("project_dir") or config.output_dir
+    created_paths = [Path(project_dir) / f["filename"] for f in generated]
 
     # 4. Resultado da revisao
     review = result.get("review")

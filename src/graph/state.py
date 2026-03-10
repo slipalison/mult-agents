@@ -53,6 +53,12 @@ class GraphState(TypedDict):
             Usado pelo roteador condicional para limitar o loop
             coder → reviewer. Começa em 0, incrementado pelo Reviewer.
 
+        project_dir:
+            Caminho do diretório onde os arquivos do projeto serão salvos.
+            Ex: "output/calculadora_python". Definido pelo nó `writer` na
+            primeira execução e reutilizado nas passagens de correção.
+            None até o Writer executar pela primeira vez.
+
         messages:
             Histórico completo de mensagens trocadas com os LLMs.
             A anotação `add_messages` instrui o LangGraph a ACUMULAR
@@ -65,4 +71,5 @@ class GraphState(TypedDict):
     generated_files: list[dict]
     review: Optional[dict]
     review_iterations: int
+    project_dir: Optional[str]
     messages: Annotated[list[BaseMessage], add_messages]

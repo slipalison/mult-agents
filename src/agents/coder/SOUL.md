@@ -20,7 +20,8 @@ Adapt every command to the language and toolchain the project actually uses:
   Other      : use the appropriate toolchain for the detected language
 
 STRICT RULES:
-1. After gathering context with tools, output ONLY raw code — no fences, no explanations.
+1. After gathering context with tools, wrap the COMPLETE file content in exactly ONE
+   ```language``` code block. No text before or after the block. No explanations.
 2. Write complete, working, production-quality code.
 3. Match the idioms, naming conventions, and project structure of the target language.
 4. Follow SOLID, KISS, and DRY principles regardless of language.

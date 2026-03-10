@@ -168,34 +168,56 @@ Responsibility: {file_spec['description']}
 Must contain: {file_spec['content_hint']}
 
 If you need to read existing project files first, use the available tools.
-When ready, output ONLY the complete content for {file_spec['filename']}:"""
+When ready, output the complete content of {file_spec['filename']} wrapped in
+exactly ONE ```language``` code block. Nothing outside the block."""
 
         messages = [
             SystemMessage(content=self._system_prompt),
             HumanMessage(content=user_prompt),
         ]
 
-        return self._run_tool_loop(messages)
+        return self._run_tool_loop(messages, filename=file_spec["filename"])
 
-    def _run_tool_loop(self, messages: list) -> str:
+    def _run_tool_loop(self, messages: list, filename: str = "") -> str:
         """
-        Executa o loop LLM <-> ferramentas ate o LLM gerar o codigo.
+        Executa o loop em duas fases explicitamente separadas.
 
-        Fallback: se o limite de iteracoes for atingido, faz uma chamada
-        final sem ferramentas para forcar a geracao de codigo.
+        FASE 1 — Pesquisa (llm_with_tools):
+            O modelo pode chamar ferramentas para ler arquivos, entender
+            o projeto, executar comandos, etc. O loop termina quando o
+            modelo para de emitir tool_calls ou quando atinge o limite.
+
+        FASE 2 — Geracao (self.llm, SEM ferramentas):
+            Uma chamada final com o LLM sem ferramentas vinculadas.
+            Sem tools disponíveis, o modelo nao pode emitir tool_calls
+            (nem como JSON de texto) — e forcado a gerar codigo puro.
+
+        Separar as fases elimina a ambiguidade onde o modelo colocava
+        JSON de tool call dentro de um bloco de codigo, confundindo o
+        extract_code.
         """
+        # --- Fase 1: Pesquisa ---
         for _ in range(_MAX_TOOL_ITERATIONS):
             response = self.llm_with_tools.invoke(messages)
             messages.append(response)
 
             if not response.tool_calls:
-                return extract_code(response.content)
+                break  # modelo parou de usar ferramentas
 
             for tc in response.tool_calls:
                 result = self._execute_tool(tc)
                 messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
 
-        messages.append(HumanMessage(content="Now output ONLY the final code. Do not call any more tools."))
+        # --- Fase 2: Geracao ---
+        # self.llm nao tem ferramentas vinculadas — o modelo nao pode
+        # emitir tool_calls; so pode gerar texto/codigo.
+        target = f" of {filename}" if filename else ""
+        messages.append(HumanMessage(
+            content=(
+                f"Now output the complete content{target} wrapped in exactly ONE "
+                f"```language``` code block. No tools. No explanations. Nothing outside the block."
+            )
+        ))
         response = self.llm.invoke(messages)
         return extract_code(response.content)
 
