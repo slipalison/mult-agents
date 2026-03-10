@@ -47,12 +47,16 @@ main.py
 
 ## src/agents/
 
-| Arquivo | Responsabilidade | Entrada (state) | Saida (state) |
+Cada agente e um **pacote Python** com dois arquivos:
+- `__init__.py` — classe do agente (logica Python)
+- `SOUL.md` — system prompt do agente (editavel sem tocar em codigo)
+
+| Pacote | Responsabilidade | Entrada (state) | Saida (state) |
 |---|---|---|---|
 | `base.py` | `BaseAgent(ABC)` — instancia `ChatOllama` no construtor, declara metodo abstrato `run(state)`. | — | — |
-| `planner.py` | `PlannerAgent` — envia demanda ao LLM, extrai JSON com plano (`objective`, `files`, `notes`). | `demand` | `plan`, `messages` |
-| `coder.py` | `CoderAgent` — modo normal: gera todos os arquivos do plano. Modo correcao: re-gera apenas os arquivos reprovados pelo Reviewer, injetando o feedback no prompt. | `plan`, `review` (opcional), `generated_files` | `generated_files` (lista completa mesclada) |
-| `reviewer.py` | `ReviewerAgent` — monta prompt com plano + conteudo de cada arquivo gerado, LLM analisa conformidade, retorna JSON de revisao. Incrementa `review_iterations` a cada execucao. | `plan`, `generated_files`, `review_iterations` | `review`, `review_iterations`, `messages` |
+| `planner/` | `PlannerAgent` — envia demanda ao LLM, extrai JSON com plano (`objective`, `files`, `notes`). | `demand` | `plan`, `messages` |
+| `coder/` | `CoderAgent` — modo normal: gera todos os arquivos do plano. Modo correcao: re-gera apenas os arquivos reprovados pelo Reviewer, injetando o feedback no prompt. | `plan`, `review` (opcional), `generated_files` | `generated_files` (lista completa mesclada) |
+| `reviewer/` | `ReviewerAgent` — monta prompt com plano + conteudo de cada arquivo gerado, LLM analisa conformidade, retorna JSON de revisao. Incrementa `review_iterations` a cada execucao. | `plan`, `generated_files`, `review_iterations` | `review`, `review_iterations`, `messages` |
 
 ### Detalhes do CoderAgent — tool loop
 

@@ -3,7 +3,13 @@ Agente Planejador.
 
 SOLID - SRP: Analisa a demanda e cria um plano estruturado.
              Nao escreve codigo. Nao salva arquivos. So planeja.
+
+O comportamento e a personalidade do agente estao definidos em SOUL.md,
+no mesmo diretorio deste arquivo. Edite o SOUL.md para mudar o prompt
+sem tocar em codigo Python.
 """
+
+from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -23,34 +29,16 @@ class PlannerAgent(BaseAgent):
       - Notas de arquitetura para orientar o CoderAgent
 
     Este plano e armazenado no estado do grafo e consumido pelo CoderAgent.
+
+    O system prompt e carregado de SOUL.md em tempo de execucao.
+    Para alterar o comportamento do agente, edite apenas esse arquivo.
     """
-
-    # Constante de classe (DRY): prompt definido uma vez, reutilizado em cada chamada.
-    # /no_think instrui o Qwen3 a nao usar o modo de raciocinio interno,
-    # pois queremos JSON direto e o <think> atrapalharia o parse.
-    SYSTEM_PROMPT = """/no_think
-You are a software architect. Analyze the development demand and produce a clear implementation plan.
-
-STRICT RULES:
-1. Respond ONLY with valid JSON - no explanations, no markdown, no extra text.
-2. Organize filenames in a logical folder structure.
-3. Be specific about what each file must contain.
-
-REQUIRED JSON FORMAT:
-{
-  "objective": "One sentence describing what will be built",
-  "files": [
-    {
-      "filename": "folder/file.ext",
-      "description": "This file's single responsibility",
-      "content_hint": "Specific classes, functions, or logic this file must contain"
-    }
-  ],
-  "notes": "Architecture decisions, design patterns, and dependencies to use"
-}"""
 
     def __init__(self):
         super().__init__(model=config.planner_model)
+        # Carrega o prompt do SOUL.md co-localizado com este pacote.
+        # Path(__file__).parent aponta para src/agents/planner/.
+        self._system_prompt = (Path(__file__).parent / "SOUL.md").read_text(encoding="utf-8")
 
     def run(self, state: dict) -> dict:
         """
@@ -74,12 +62,10 @@ REQUIRED JSON FORMAT:
         print_separator("PLANNER")
 
         messages = [
-            SystemMessage(content=self.SYSTEM_PROMPT),
+            SystemMessage(content=self._system_prompt),
             HumanMessage(content=f"Development demand: {demand}"),
         ]
 
-        # Spinner envolve a chamada bloqueante ao LLM.
-        # s.elapsed_str() fica disponivel apos o bloco encerrar.
         with spinner("planner", f"Chamando {config.planner_model}") as s:
             response = self.llm.invoke(messages)
 

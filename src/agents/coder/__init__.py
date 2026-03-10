@@ -3,7 +3,13 @@ Agente Programador.
 
 SOLID - SRP: Implementa codigo baseado no plano recebido.
              Nao planeja. Nao salva arquivos no disco. So gera codigo.
+
+O comportamento e a personalidade do agente estao definidos em SOUL.md,
+no mesmo diretorio deste arquivo. Edite o SOUL.md para mudar o prompt
+sem tocar em codigo Python.
 """
+
+from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
@@ -22,38 +28,25 @@ class CoderAgent(BaseAgent):
     """
     Recebe o plano do PlannerAgent e implementa cada arquivo especificado.
 
-    Possui acesso a ferramentas de leitura do sistema de arquivos:
-      - list_directory : lista arquivos do projeto
-      - read_file      : le o conteudo de um arquivo
+    Opera em dois modos dependendo do estado recebido:
 
-    O LLM decide autonomamente quando chamar essas ferramentas antes de
-    gerar o codigo. Isso permite que ele leia codigo existente para
-    manter consistencia de imports, nomes de classes, etc.
+    Modo normal (primeira execucao):
+      - Gera todos os arquivos do plano do zero.
 
-    Fluxo por arquivo:
-        1. LLM recebe o prompt com o plano
-        2. LLM (opcionalmente) chama ferramentas para ler contexto
-        3. Ferramenta executa, resultado volta como ToolMessage
-        4. LLM gera o codigo final
-        5. Codigo e extraido e armazenado no estado
+    Modo correcao (chamado pelo loop coder <-> reviewer):
+      - Re-gera APENAS os arquivos com status != "ok", incluindo o
+        feedback especifico do Reviewer no prompt de cada arquivo.
+      - Mantem os arquivos aprovados intactos.
+      - Retorna a lista completa mesclada (aprovados + corrigidos).
+
+    O system prompt e carregado de SOUL.md em tempo de execucao.
+    Para alterar o comportamento do agente, edite apenas esse arquivo.
     """
-
-    SYSTEM_PROMPT = """/no_think
-You are an expert software developer implementing files from a project plan.
-
-You have access to file reading tools. Use them when you need to understand
-the existing codebase before writing a file (e.g., to check imports, class
-names, or conventions already established by other files).
-
-STRICT RULES:
-1. After gathering context with tools, output ONLY raw code.
-2. No markdown fences (```), no explanations before or after.
-3. Write complete, working, production-quality code.
-4. Follow SOLID, KISS, and DRY principles.
-5. Add concise docstrings and comments where the logic is not obvious."""
 
     def __init__(self):
         super().__init__(model=config.coder_model, temperature=0.2)
+        # Carrega o prompt do SOUL.md co-localizado com este pacote.
+        self._system_prompt = (Path(__file__).parent / "SOUL.md").read_text(encoding="utf-8")
 
         # LLM com ferramentas vinculadas — o modelo recebe o schema JSON
         # de cada tool e pode emitir tool_calls na sua resposta.
@@ -68,16 +61,6 @@ STRICT RULES:
         """
         Implementa (ou corrige) arquivos do plano, um por vez.
 
-        Modo normal (primeira execucao):
-          - Gera todos os arquivos do plano do zero.
-
-        Modo correcao (chamado pelo loop coder <-> reviewer):
-          - Recebe o review do Reviewer com a lista de arquivos problematicos.
-          - Re-gera APENAS os arquivos com status != "ok", incluindo o
-            feedback especifico do Reviewer no prompt de cada arquivo.
-          - Mantem os arquivos aprovados intactos (nao os re-gera).
-          - Retorna a lista completa mesclada (aprovados + corrigidos).
-
         Args:
             state: Deve conter "plan" (dict). Opcionalmente "review" (dict)
                    e "generated_files" (list[dict]) para o modo correcao.
@@ -91,8 +74,6 @@ STRICT RULES:
         is_correction = bool(review and review.get("status") == "issues_found")
 
         if is_correction:
-            # Identifica quais arquivos precisam ser corrigidos e monta o
-            # mapa de feedback: filename → lista de issues + suggestions
             feedback_map: dict[str, list[str]] = {}
             for frev in review.get("files", []):
                 if frev.get("status") != "ok":
@@ -103,8 +84,8 @@ STRICT RULES:
             files_to_generate = [
                 f for f in plan["files"] if f["filename"] in feedback_map
             ]
-            total      = len(files_to_generate)
-            iteration  = state.get("review_iterations", 1)
+            total     = len(files_to_generate)
+            iteration = state.get("review_iterations", 1)
 
             print_separator("CODER")
             print_agent("coder", f"Correcao {iteration}: {total} arquivo(s) para re-gerar")
@@ -116,8 +97,6 @@ STRICT RULES:
             print_separator("CODER")
             print_agent("coder", f"{total} arquivo(s) para gerar com {config.coder_model}")
 
-        # Contexto inicial: arquivos gerados anteriormente (passagem anterior
-        # ou arquivos ja gerados nesta rodada). Vai crescendo a cada arquivo.
         context_files: list[dict] = list(prev_files)
         newly_generated: list[dict] = []
 
@@ -131,13 +110,10 @@ STRICT RULES:
             lines = len(content.splitlines())
             print_agent("coder", f"({i}/{total}) {filename}  -  {lines} linhas  ({s.elapsed_str()})")
 
-            # Atualiza o contexto para o proximo arquivo desta rodada
             context_files = [f for f in context_files if f["filename"] != filename]
             context_files.append({"filename": filename, "content": content})
             newly_generated.append({"filename": filename, "content": content})
 
-        # Mescla: parte dos arquivos anteriores que NAO foram re-gerados
-        # com os arquivos recém gerados/corrigidos nesta rodada.
         prev_map = {f["filename"]: f["content"] for f in prev_files}
         for gen in newly_generated:
             prev_map[gen["filename"]] = gen["content"]
@@ -157,23 +133,17 @@ STRICT RULES:
         """
         Gera o conteudo de um unico arquivo via tool loop.
 
-        O loop permite que o LLM chame ferramentas de leitura antes de
-        escrever o codigo final. A sequencia de mensagens cresce a cada
-        iteracao com os resultados das ferramentas.
-
         Args:
             plan             : Plano completo do projeto.
             file_spec        : Especificacao do arquivo a gerar.
             already_generated: Arquivos ja gerados/disponiveis como contexto.
-            review_issues    : Lista de problemas apontados pelo Reviewer para
-                               este arquivo (modo correcao). None na primeira geracao.
+            review_issues    : Problemas apontados pelo Reviewer (modo correcao).
 
         Returns:
             Conteudo do arquivo como string pura.
         """
         context = self._build_context(plan, file_spec, already_generated)
 
-        # Secao de feedback do Reviewer — so aparece no modo correcao
         feedback_section = ""
         if review_issues:
             feedback_section = "\nREVIEWER FEEDBACK -- fix ALL of these issues:\n"
@@ -195,7 +165,7 @@ If you need to read existing project files first, use the available tools.
 When ready, output ONLY the complete content for {file_spec['filename']}:"""
 
         messages = [
-            SystemMessage(content=self.SYSTEM_PROMPT),
+            SystemMessage(content=self._system_prompt),
             HumanMessage(content=user_prompt),
         ]
 
@@ -205,52 +175,26 @@ When ready, output ONLY the complete content for {file_spec['filename']}:"""
         """
         Executa o loop LLM <-> ferramentas ate o LLM gerar o codigo.
 
-        Cada iteracao:
-          1. Chama o LLM com ferramentas vinculadas
-          2. Se a resposta contem tool_calls  -> executa cada ferramenta,
-             adiciona ToolMessage ao historico, continua o loop
-          3. Se a resposta nao tem tool_calls -> e o codigo final, retorna
-
         Fallback: se o limite de iteracoes for atingido, faz uma chamada
-        final sem ferramentas para forcsr a geracao de codigo.
-
-        Args:
-            messages: Historico inicial de mensagens (system + human).
-
-        Returns:
-            Conteudo do arquivo como string pura.
+        final sem ferramentas para forcar a geracao de codigo.
         """
         for _ in range(_MAX_TOOL_ITERATIONS):
             response = self.llm_with_tools.invoke(messages)
             messages.append(response)
 
-            # Sem tool_calls -> o LLM decidiu gerar o codigo diretamente
             if not response.tool_calls:
                 return extract_code(response.content)
 
-            # Com tool_calls -> executa cada ferramenta e alimenta o resultado
             for tc in response.tool_calls:
                 result = self._execute_tool(tc)
                 messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
 
-        # Fallback: forcsa resposta sem ferramentas apos esgotar iteracoes
         messages.append(HumanMessage(content="Now output ONLY the final code. Do not call any more tools."))
         response = self.llm.invoke(messages)
         return extract_code(response.content)
 
     def _execute_tool(self, tool_call: dict) -> str:
-        """
-        Executa uma chamada de ferramenta emitida pelo LLM.
-
-        Imprime no console qual ferramenta foi chamada (dim) para
-        o usuario acompanhar o raciocinio do agente.
-
-        Args:
-            tool_call: Dict com "name", "args" e "id" (formato LangChain).
-
-        Returns:
-            Resultado da ferramenta como string.
-        """
+        """Executa uma chamada de ferramenta emitida pelo LLM."""
         name = tool_call["name"]
         args = tool_call["args"]
 
@@ -260,7 +204,6 @@ When ready, output ONLY the complete content for {file_spec['filename']}:"""
         else:
             result = tool_fn.invoke(args)
 
-        # Exibe qual ferramenta foi chamada e quantos chars retornou
         args_display = ", ".join(f'{k}="{v}"' for k, v in args.items())
         print_agent("coder", f"[tool] {name}({args_display})  ->  {len(result)} chars", dim=True)
 
