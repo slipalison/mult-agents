@@ -7,10 +7,28 @@ KISS        : Fluxo linear: input -> grafo -> exibir resultado.
 YAGNI       : Sem CLI complexa, sem argumentos opcionais.
 """
 
+import os
 import sys
 from pathlib import Path
 
+# Carrega .env antes de importar config (que le os.environ no __init__)
+# python-dotenv e opcional — sem ele, use variaveis de ambiente diretamente.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from src.config import config
+
+# LangSmith: ativa o tracing antes de qualquer importacao LangChain/LangGraph.
+# Quando LANGSMITH_API_KEY esta definido, todos os nos do grafo sao rastreados
+# automaticamente — sem nenhuma alteracao nos agentes.
+if config.langsmith_enabled:
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGCHAIN_API_KEY"]    = config.langsmith_api_key
+    os.environ["LANGCHAIN_PROJECT"]    = config.langsmith_project
+
 from src.console import (
     console,
     print_demand,
@@ -34,7 +52,13 @@ def main() -> None:
         5. Exibe painel de resumo final
     """
     # 1. Cabecalho
-    print_header(config.planner_model, config.coder_model, config.reviewer_model, config.output_dir)
+    print_header(
+        config.planner_model,
+        config.coder_model,
+        config.reviewer_model,
+        config.output_dir,
+        langsmith_project=config.langsmith_project if config.langsmith_enabled else None,
+    )
 
     # 2. Le a demanda
     if len(sys.argv) > 1:

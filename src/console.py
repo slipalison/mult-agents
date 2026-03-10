@@ -157,11 +157,17 @@ def print_separator(title: str = "") -> None:
     console.print()
 
 
-def print_header(planner_model: str, coder_model: str, reviewer_model: str, output_dir: str) -> None:
+def print_header(
+    planner_model: str,
+    coder_model: str,
+    reviewer_model: str,
+    output_dir: str,
+    langsmith_project: str | None = None,
+) -> None:
     """
     Painel de cabecalho com os modelos e o diretorio de saida.
 
-    Visual:
+    Visual (sem LangSmith):
         ╭── Sistema de Agentes LangGraph + Ollama ──╮
         │                                           │
         │  Planner   qwen3.5:9b                     │
@@ -170,6 +176,9 @@ def print_header(planner_model: str, coder_model: str, reviewer_model: str, outp
         │  Saida     ./output/                      │
         │                                           │
         ╰───────────────────────────────────────────╯
+
+    Visual (com LangSmith):
+        │  LangSmith like_claude (ativo)            │
     """
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="dim", min_width=10)
@@ -178,6 +187,8 @@ def print_header(planner_model: str, coder_model: str, reviewer_model: str, outp
     grid.add_row("Coder",    f"[green]{coder_model}[/green]")
     grid.add_row("Reviewer", f"[magenta]{reviewer_model}[/magenta]")
     grid.add_row("Saida",    f"[yellow]./{output_dir}/[/yellow]")
+    if langsmith_project:
+        grid.add_row("LangSmith", f"[blue]{langsmith_project}[/blue] [blue dim](ativo)[/blue dim]")
 
     console.print(
         Panel(

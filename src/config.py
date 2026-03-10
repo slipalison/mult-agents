@@ -19,7 +19,8 @@ Para contexto DIDATICO: prefira modelos pequenos — iteracao rapida importa
 mais do que saida perfeita.
 """
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,15 @@ class Config:
     # --- LLM ---
     # Temperatura baixa = respostas mais deterministicas (bom para JSON e codigo)
     temperature: float = 0.1
+
+    # --- LangSmith (opcional) ---
+    # Configure via variavel de ambiente:
+    #   LANGSMITH_API_KEY=ls__...   (obrigatorio para ativar)
+    #   LANGSMITH_PROJECT=meu-projeto  (opcional, padrao: like_claude)
+    # Com a chave configurada, todo o grafo e rastreado automaticamente.
+    langsmith_api_key: str = field(default_factory=lambda: os.environ.get("LANGSMITH_API_KEY", ""))
+    langsmith_project: str = field(default_factory=lambda: os.environ.get("LANGSMITH_PROJECT", "like_claude"))
+    langsmith_enabled: bool = field(default_factory=lambda: bool(os.environ.get("LANGSMITH_API_KEY", "")))
 
 
 # Instancia global — importe `config` em vez de instanciar Config diretamente
