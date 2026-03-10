@@ -17,7 +17,13 @@ from src.agents.base import BaseAgent
 from src.config import config
 from src.console import print_agent, print_separator, spinner
 from src.tools.file_reader import FILE_READER_TOOLS
+from src.tools.shell import SHELL_TOOLS
 from src.utils import extract_code
+
+# Todas as ferramentas disponíveis para o CoderAgent.
+# SOLID - OCP: adicionar ferramentas nao muda a classe —
+#              basta atualizar FILE_READER_TOOLS ou SHELL_TOOLS nos seus modulos.
+_ALL_TOOLS = FILE_READER_TOOLS + SHELL_TOOLS
 
 # Numero maximo de iteracoes do tool loop.
 # Evita loops infinitos caso o LLM fique chamando ferramentas repetidamente.
@@ -52,10 +58,10 @@ class CoderAgent(BaseAgent):
         # de cada tool e pode emitir tool_calls na sua resposta.
         # SOLID - OCP: adicionar novas ferramentas nao muda esta classe,
         #              basta atualizar FILE_READER_TOOLS em file_reader.py.
-        self.llm_with_tools = self.llm.bind_tools(FILE_READER_TOOLS)
+        self.llm_with_tools = self.llm.bind_tools(_ALL_TOOLS)
 
         # Mapa nome -> funcao para executar tool calls do LLM
-        self._tool_map = {t.name: t for t in FILE_READER_TOOLS}
+        self._tool_map = {t.name: t for t in _ALL_TOOLS}
 
     def run(self, state: dict) -> dict:
         """

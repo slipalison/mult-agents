@@ -2,12 +2,9 @@
 Construção e compilação do grafo LangGraph.
 
 SOLID - SRP: Este módulo apenas monta a topologia do grafo.
-             Não contém lógica de agente nem de arquivo.
-SOLID - OCP: Para adicionar um novo nó (ex: ReviewerAgent), basta estender
-             este arquivo — sem tocar nos agentes existentes.
-KISS        : Grafo linear simples. Sem condicionais ou loops por enquanto.
-YAGNI       : Não adicionamos checkpoints ou memória persistente porque
-              não foram solicitados.
+             Não contém lógica de agente.
+SOLID - OCP: Para adicionar um novo nó, basta estender este arquivo —
+             sem tocar nos agentes existentes.
 """
 
 from langgraph.graph import END, START, StateGraph
@@ -16,7 +13,38 @@ from src.agents.coder import CoderAgent
 from src.agents.planner import PlannerAgent
 from src.agents.reviewer import ReviewerAgent
 from src.config import config
+from src.console import print_agent, print_separator, spinner
 from src.graph.state import GraphState
+from src.tools.file_writer import FileWriter
+
+
+def _writer_node(state: dict) -> dict:
+    """
+    Persiste os generated_files no disco apos cada passagem do Coder.
+
+    Isso e necessario para que o CoderAgent possa usar o run_powershell
+    tool nas passagens de correcao — os arquivos precisam estar no disco
+    para que pytest, python, etc. consigam executa-los.
+
+    Posicao no grafo: entre coder e reviewer.
+    O loop fica: coder → writer → reviewer → coder → writer → ...
+
+    Returns:
+        {} — nao atualiza o estado do grafo (apenas efeito colateral de I/O).
+    """
+    generated = state.get("generated_files", [])
+    if not generated:
+        return {}
+
+    print_separator("WRITER")
+
+    with spinner("writer", f"Salvando {len(generated)} arquivo(s) em ./{config.output_dir}/") as s:
+        writer = FileWriter(config.output_dir)
+        created = writer.write_all(generated)
+
+    print_agent("writer", f"Salvo {len(created)} arquivo(s)  ({s.elapsed_str()})")
+
+    return {}
 
 
 def _route_after_review(state: dict) -> str:
@@ -45,37 +73,41 @@ def build_graph():
 
     Topologia (fluxo feliz):
 
-        START → planner → coder → reviewer → END
+        START → planner → coder → writer → reviewer → END
 
     Topologia (com correcoes):
 
-        START → planner → coder → reviewer ─┐
-                                    ▲        │ issues_found
-                                    └────────┘ (ate max_review_iterations)
+        START → planner → coder → writer → reviewer ─┐
+                               ▲                      │ issues_found
+                               └──────────────────────┘ (ate max_review_iterations)
 
-    Os agentes são instanciados aqui (não dentro dos nós) para que o
-    objeto LLM seja criado uma vez e reutilizado em execuções repetidas.
+    O no `writer` salva os arquivos no disco apos cada passagem do Coder.
+    Isso permite que o Coder use run_powershell para testar o codigo nas
+    passagens de correcao (os arquivos do passe anterior estao no disco).
+
+    Os agentes sao instanciados aqui (nao dentro dos nos) para que o
+    objeto LLM seja criado uma vez e reutilizado em execucoes repetidas.
 
     Returns:
         CompiledGraph: Grafo compilado, pronto para .invoke() ou .stream().
     """
-    # Instancia agentes — cada um carrega seu modelo Ollama
     planner  = PlannerAgent()
     coder    = CoderAgent()
     reviewer = ReviewerAgent()
 
-    # Cria o grafo tipado com GraphState
     graph = StateGraph(GraphState)
 
-    # --- Nós ---
+    # --- Nos ---
     graph.add_node("planner",  planner.run)
     graph.add_node("coder",    coder.run)
+    graph.add_node("writer",   _writer_node)   # salva arquivos entre coder e reviewer
     graph.add_node("reviewer", reviewer.run)
 
     # --- Arestas fixas ---
-    graph.add_edge(START,     "planner")   # Entrada → Planner
-    graph.add_edge("planner", "coder")     # Planner → Coder
-    graph.add_edge("coder",   "reviewer")  # Coder   → Reviewer
+    graph.add_edge(START,      "planner")   # Entrada  → Planner
+    graph.add_edge("planner",  "coder")     # Planner  → Coder
+    graph.add_edge("coder",    "writer")    # Coder    → Writer  (salva no disco)
+    graph.add_edge("writer",   "reviewer")  # Writer   → Reviewer
 
     # --- Aresta condicional: Reviewer → Coder (correcao) ou END ---
     graph.add_conditional_edges(
@@ -84,5 +116,4 @@ def build_graph():
         {"coder": "coder", END: END},
     )
 
-    # Compila valida o grafo e gera o executor otimizado
     return graph.compile()

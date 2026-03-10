@@ -3,11 +3,12 @@ Ponto de entrada do sistema de agentes LangGraph + Ollama.
 
 SOLID - SRP: Apenas orquestra a execucao — nao contem logica de agente,
              LLM ou sistema de arquivos.
-KISS        : Fluxo linear: input -> grafo -> salvar -> exibir resultado.
+KISS        : Fluxo linear: input -> grafo -> exibir resultado.
 YAGNI       : Sem CLI complexa, sem argumentos opcionais.
 """
 
 import sys
+from pathlib import Path
 
 from src.config import config
 from src.console import (
@@ -16,13 +17,9 @@ from src.console import (
     print_error,
     print_header,
     print_review,
-    print_separator,
     print_summary,
-    spinner,
-    print_agent,
 )
 from src.graph.builder import build_graph
-from src.tools.file_writer import FileWriter
 
 
 def main() -> None:
@@ -31,8 +28,9 @@ def main() -> None:
 
         1. Exibe cabecalho com painel de configuracoes
         2. Le a demanda (argumento CLI ou input interativo)
-        3. Executa o grafo: PLANNER -> CODER  (com spinners internos)
-        4. Salva os arquivos gerados em ./output/  (com spinner)
+        3. Executa o grafo: planner → coder → writer → reviewer (loop)
+           Os arquivos sao salvos no disco pelo no `writer` dentro do grafo.
+        4. Exibe resultado da revisao
         5. Exibe painel de resumo final
     """
     # 1. Cabecalho
@@ -51,8 +49,9 @@ def main() -> None:
 
     print_demand(demand)
 
-    # 3. Executa o grafo
-    # Os agentes imprimem seus proprios separadores e spinners internamente.
+    # 3. Executa o grafo.
+    # O no `writer` dentro do grafo ja salva os arquivos no disco apos cada
+    # passagem do Coder — nao e necessario salvar novamente aqui.
     graph = build_graph()
 
     result = graph.invoke({
@@ -69,21 +68,15 @@ def main() -> None:
         print_error("Nenhum arquivo foi gerado. Verifique os logs acima.")
         sys.exit(1)
 
-    # 4. Salva os arquivos (com spinner para o writer)
-    print_separator("WRITER")
+    # Reconstroi os paths a partir dos generated_files (ja escritos pelo writer node)
+    created_paths = [Path(config.output_dir) / f["filename"] for f in generated]
 
-    with spinner("writer", f"Salvando {len(generated)} arquivo(s) em ./{config.output_dir}/") as s:
-        writer = FileWriter(config.output_dir)
-        created_paths = writer.write_all(generated)
-
-    print_agent("writer", f"Salvo {len(created_paths)} arquivo(s)  ({s.elapsed_str()})")
-
-    # 5. Resultado da revisao
+    # 4. Resultado da revisao
     review = result.get("review")
     if review:
         print_review(review)
 
-    # 6. Resumo final
+    # 5. Resumo final
     print_summary(created_paths, result.get("plan", {}))
 
 

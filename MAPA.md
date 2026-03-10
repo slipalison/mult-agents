@@ -12,16 +12,17 @@ main.py
   └─ build_graph()
        ├─ PlannerAgent   → analisa demanda → produz plano JSON
        │
-       ├─ CoderAgent     → consome plano → gera codigo por arquivo
+       ├─ CoderAgent     → gera/corrige arquivos; usa run_powershell para testar
        │    ↑  (re-gera apenas arquivos com problemas, com feedback do Reviewer)
+       │    │
+       ├─ _writer_node   → salva generated_files no disco (output/)
+       │    │               permite que o Coder teste com run_powershell
+       │    │               na proxima passagem de correcao
        │    │
        └─ ReviewerAgent  → le plano + codigo → reporta conformidade
             │
             ├─ status "ok"           → END
             └─ status "issues_found" → volta ao CoderAgent (ate max_review_iterations)
-
-  main.py (apos grafo)
-       └─ FileWriter.write_all() → salva arquivos em output/
 ```
 
 ---
@@ -77,7 +78,7 @@ _generate_file()
 | Arquivo | O que faz |
 |---|---|
 | `state.py` | `GraphState(TypedDict)` — contrato de dados do grafo. Campos: `demand` (str), `plan` (dict\|None), `generated_files` (list[dict]), `review` (dict\|None), `review_iterations` (int), `messages` (Annotated com `add_messages` para acumulo). |
-| `builder.py` | `build_graph()` — instancia os 3 agentes, cria `StateGraph(GraphState)`, adiciona nos e arestas. A funcao `_route_after_review` implementa a aresta condicional `reviewer → coder \| END`. Retorna `CompiledGraph`. |
+| `builder.py` | `build_graph()` — instancia os 3 agentes, cria `StateGraph(GraphState)`, adiciona nos e arestas. Contem `_writer_node` (salva arquivos no disco entre coder e reviewer) e `_route_after_review` (aresta condicional `reviewer → coder \| END`). Retorna `CompiledGraph`. |
 
 ---
 
@@ -85,8 +86,9 @@ _generate_file()
 
 | Arquivo | O que faz |
 |---|---|
-| `file_reader.py` | `@tool list_directory(subdirectory)` — lista arquivos do projeto (ignora `.git`, `__pycache__`, etc.). `@tool read_file(filepath)` — le conteudo de arquivo. Ambos restritos ao CWD (sem path traversal). Exporta `FILE_READER_TOOLS = [list_directory, read_file]`. |
-| `file_writer.py` | `FileWriter(output_dir)` — `write(filename, content)` salva um arquivo. `write_all(files)` itera a lista. Cria subdiretorios automaticamente. Salva em UTF-8. |
+| `file_reader.py` | `@tool list_directory(subdirectory)` — lista arquivos do projeto (ignora `.git`, `__pycache__`, etc.). `@tool read_file(filepath)` — le conteudo de arquivo. Ambos restritos ao CWD (sem path traversal). Exporta `FILE_READER_TOOLS`. |
+| `file_writer.py` | `FileWriter(output_dir)` — `write(filename, content)` salva um arquivo. `write_all(files)` itera a lista. Cria subdiretorios automaticamente. Salva em UTF-8. Usado pelo `_writer_node` no grafo. |
+| `shell.py` | `@tool run_powershell(command)` — executa comando PowerShell no diretorio `output/`. Timeout 30s, output limitado a 4000 chars. Exporta `SHELL_TOOLS`. Usado pelo CoderAgent para testar o codigo gerado. |
 
 ---
 
