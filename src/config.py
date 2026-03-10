@@ -45,6 +45,12 @@ class Config:
     #   - Juntos os dois usam ~11GB — cabem simultaneamente na RTX 4090
     planner_model: str = "qwen3.5:9b"
     coder_model: str = "qwen2.5-coder:7b"
+    reviewer_model: str = "qwen3.5:9b"
+
+    # Numero maximo de vezes que o Reviewer pode reprovar e devolver ao Coder.
+    # Com max=3: o Coder pode ser chamado para correcao ate 2 vezes apos a
+    # primeira geracao (reviewer roda 3x no total antes de forcsar o END).
+    max_review_iterations: int = 3
 
     # --- Conexao com Ollama ---
     ollama_base_url: str = "http://localhost:11434"

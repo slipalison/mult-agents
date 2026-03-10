@@ -39,6 +39,20 @@ class GraphState(TypedDict):
             [{"filename": str, "content": str}, ...]
             Lista vazia até o Coder executar.
 
+        review:
+            Saída do ReviewerAgent. Dict com a estrutura:
+            {
+                "status": "ok" | "issues_found",
+                "summary": str,
+                "files": [{"filename": str, "status": str, "issues": list, "suggestions": list}]
+            }
+            None até o Reviewer executar.
+
+        review_iterations:
+            Quantas vezes o Reviewer já executou nesta sessão.
+            Usado pelo roteador condicional para limitar o loop
+            coder → reviewer. Começa em 0, incrementado pelo Reviewer.
+
         messages:
             Histórico completo de mensagens trocadas com os LLMs.
             A anotação `add_messages` instrui o LangGraph a ACUMULAR
@@ -49,4 +63,6 @@ class GraphState(TypedDict):
     demand: str
     plan: Optional[dict]
     generated_files: list[dict]
+    review: Optional[dict]
+    review_iterations: int
     messages: Annotated[list[BaseMessage], add_messages]

@@ -29,10 +29,11 @@ console = Console(highlight=False)
 # ── Paleta de cores por papel ─────────────────────────────────────────────────
 # Cada agente tem uma cor unica para facilitar a leitura no terminal.
 AGENT_COLOR: dict[str, str] = {
-    "planner": "cyan",
-    "coder":   "green",
-    "writer":  "yellow",
-    "system":  "white",
+    "planner":  "cyan",
+    "coder":    "green",
+    "reviewer": "magenta",
+    "writer":   "yellow",
+    "system":   "white",
 }
 
 # ── Frames do spinner ─────────────────────────────────────────────────────────
@@ -156,25 +157,27 @@ def print_separator(title: str = "") -> None:
     console.print()
 
 
-def print_header(planner_model: str, coder_model: str, output_dir: str) -> None:
+def print_header(planner_model: str, coder_model: str, reviewer_model: str, output_dir: str) -> None:
     """
     Painel de cabecalho com os modelos e o diretorio de saida.
 
     Visual:
         ╭── Sistema de Agentes LangGraph + Ollama ──╮
         │                                           │
-        │  Planner  qwen3.5:9b                      │
-        │  Coder    qwen2.5-coder:7b                │
-        │  Saida    ./output/                       │
+        │  Planner   qwen3.5:9b                     │
+        │  Coder     qwen2.5-coder:7b               │
+        │  Reviewer  qwen3.5:9b                     │
+        │  Saida     ./output/                      │
         │                                           │
         ╰───────────────────────────────────────────╯
     """
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="dim", min_width=10)
     grid.add_column()
-    grid.add_row("Planner", f"[cyan]{planner_model}[/cyan]")
-    grid.add_row("Coder",   f"[green]{coder_model}[/green]")
-    grid.add_row("Saida",   f"[yellow]./{output_dir}/[/yellow]")
+    grid.add_row("Planner",  f"[cyan]{planner_model}[/cyan]")
+    grid.add_row("Coder",    f"[green]{coder_model}[/green]")
+    grid.add_row("Reviewer", f"[magenta]{reviewer_model}[/magenta]")
+    grid.add_row("Saida",    f"[yellow]./{output_dir}/[/yellow]")
 
     console.print(
         Panel(
@@ -228,6 +231,62 @@ def print_summary(created_paths: list, plan: dict) -> None:
             body,
             title=f"[green bold]  CONCLUIDO -- {len(created_paths)} arquivo(s) gerado(s)  [/green bold]",
             border_style="green",
+            padding=(1, 2),
+        )
+    )
+
+
+def print_review(review: dict) -> None:
+    """
+    Painel com o resultado da revisao do ReviewerAgent.
+
+    Visual (ok):
+        ╭── REVISAO -- ok ──╮
+        │  Todos os arquivos implementados corretamente.  │
+        │  > src/main.py       ok                        │
+        ╰────────────────────────────────────────────────╯
+
+    Visual (issues_found):
+        ╭── REVISAO -- issues_found ──╮
+        │  Foram encontrados problemas em 1 arquivo.      │
+        │  > src/main.py       incomplete                 │
+        │      ! import nao declarado no plano            │
+        ╰────────────────────────────────────────────────╯
+    """
+    status = review.get("status", "unknown")
+    color  = "green" if status == "ok" else "yellow"
+
+    body = Text()
+    summary = review.get("summary", "")
+    if summary:
+        body.append(summary + "\n\n", style="italic dim")
+
+    for frev in review.get("files", []):
+        fname   = frev.get("filename", "?")
+        fstatus = frev.get("status", "?")
+        fcolor  = "green" if fstatus == "ok" else "yellow"
+
+        body.append("  > ", style=f"{fcolor} bold")
+        body.append(f"{fname:<40}", style=fcolor)
+        body.append(f"  {fstatus}\n", style=f"{fcolor} bold")
+
+        for issue in frev.get("issues", []):
+            body.append(f"      ! {issue}\n", style="yellow dim")
+        for sug in frev.get("suggestions", []):
+            body.append(f"      * {sug}\n", style="dim")
+
+    # Remove \n final para nao gerar espaco extra antes do border.
+    # body.rstrip() (sem args) usa a API oficial do Rich e atualiza
+    # _spans + _length corretamente — manipular _text diretamente corrompe
+    # os offsets internos e causa IndexError no render.
+    body.rstrip()
+
+    console.print()
+    console.print(
+        Panel(
+            body,
+            title=f"[{color} bold]  REVISAO -- {status}  [/{color} bold]",
+            border_style=color,
             padding=(1, 2),
         )
     )

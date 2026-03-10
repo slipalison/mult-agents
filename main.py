@@ -15,6 +15,7 @@ from src.console import (
     print_demand,
     print_error,
     print_header,
+    print_review,
     print_separator,
     print_summary,
     spinner,
@@ -35,7 +36,7 @@ def main() -> None:
         5. Exibe painel de resumo final
     """
     # 1. Cabecalho
-    print_header(config.planner_model, config.coder_model, config.output_dir)
+    print_header(config.planner_model, config.coder_model, config.reviewer_model, config.output_dir)
 
     # 2. Le a demanda
     if len(sys.argv) > 1:
@@ -58,6 +59,8 @@ def main() -> None:
         "demand": demand,
         "plan": None,
         "generated_files": [],
+        "review": None,
+        "review_iterations": 0,
         "messages": [],
     })
 
@@ -75,7 +78,12 @@ def main() -> None:
 
     print_agent("writer", f"Salvo {len(created_paths)} arquivo(s)  ({s.elapsed_str()})")
 
-    # 5. Resumo final
+    # 5. Resultado da revisao
+    review = result.get("review")
+    if review:
+        print_review(review)
+
+    # 6. Resumo final
     print_summary(created_paths, result.get("plan", {}))
 
 

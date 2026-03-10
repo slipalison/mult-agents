@@ -66,39 +66,84 @@ STRICT RULES:
 
     def run(self, state: dict) -> dict:
         """
-        Implementa todos os arquivos do plano, um por vez.
+        Implementa (ou corrige) arquivos do plano, um por vez.
 
-        Para cada arquivo:
-          1. Exibe spinner com nome do arquivo e cronometro
-          2. Executa o tool loop (o LLM pode ler arquivos antes de codar)
-          3. Exibe resumo (linhas geradas + tempo decorrido)
+        Modo normal (primeira execucao):
+          - Gera todos os arquivos do plano do zero.
+
+        Modo correcao (chamado pelo loop coder <-> reviewer):
+          - Recebe o review do Reviewer com a lista de arquivos problematicos.
+          - Re-gera APENAS os arquivos com status != "ok", incluindo o
+            feedback especifico do Reviewer no prompt de cada arquivo.
+          - Mantem os arquivos aprovados intactos (nao os re-gera).
+          - Retorna a lista completa mesclada (aprovados + corrigidos).
 
         Args:
-            state: Deve conter "plan" (dict) com o plano do PlannerAgent.
+            state: Deve conter "plan" (dict). Opcionalmente "review" (dict)
+                   e "generated_files" (list[dict]) para o modo correcao.
 
         Returns:
-            {"generated_files": list[dict]}
+            {"generated_files": list[dict]}  -- lista completa e atualizada
         """
-        plan  = state["plan"]
-        files = plan["files"]
-        total = len(files)
-        generated_files: list[dict] = []
+        plan          = state["plan"]
+        review        = state.get("review")
+        prev_files    = state.get("generated_files", [])
+        is_correction = bool(review and review.get("status") == "issues_found")
 
-        print_separator("CODER")
-        print_agent("coder", f"{total} arquivo(s) para gerar com {config.coder_model}")
+        if is_correction:
+            # Identifica quais arquivos precisam ser corrigidos e monta o
+            # mapa de feedback: filename → lista de issues + suggestions
+            feedback_map: dict[str, list[str]] = {}
+            for frev in review.get("files", []):
+                if frev.get("status") != "ok":
+                    feedback_map[frev["filename"]] = (
+                        frev.get("issues", []) + frev.get("suggestions", [])
+                    )
 
-        for i, file_spec in enumerate(files, start=1):
-            filename = file_spec["filename"]
+            files_to_generate = [
+                f for f in plan["files"] if f["filename"] in feedback_map
+            ]
+            total      = len(files_to_generate)
+            iteration  = state.get("review_iterations", 1)
+
+            print_separator("CODER")
+            print_agent("coder", f"Correcao {iteration}: {total} arquivo(s) para re-gerar")
+        else:
+            files_to_generate = plan["files"]
+            total             = len(files_to_generate)
+            feedback_map      = {}
+
+            print_separator("CODER")
+            print_agent("coder", f"{total} arquivo(s) para gerar com {config.coder_model}")
+
+        # Contexto inicial: arquivos gerados anteriormente (passagem anterior
+        # ou arquivos ja gerados nesta rodada). Vai crescendo a cada arquivo.
+        context_files: list[dict] = list(prev_files)
+        newly_generated: list[dict] = []
+
+        for i, file_spec in enumerate(files_to_generate, start=1):
+            filename      = file_spec["filename"]
+            review_issues = feedback_map.get(filename, [])
 
             with spinner("coder", f"({i}/{total}) {filename}") as s:
-                content = self._generate_file(plan, file_spec, generated_files)
+                content = self._generate_file(plan, file_spec, context_files, review_issues)
 
             lines = len(content.splitlines())
             print_agent("coder", f"({i}/{total}) {filename}  -  {lines} linhas  ({s.elapsed_str()})")
 
-            generated_files.append({"filename": filename, "content": content})
+            # Atualiza o contexto para o proximo arquivo desta rodada
+            context_files = [f for f in context_files if f["filename"] != filename]
+            context_files.append({"filename": filename, "content": content})
+            newly_generated.append({"filename": filename, "content": content})
 
-        return {"generated_files": generated_files}
+        # Mescla: parte dos arquivos anteriores que NAO foram re-gerados
+        # com os arquivos recém gerados/corrigidos nesta rodada.
+        prev_map = {f["filename"]: f["content"] for f in prev_files}
+        for gen in newly_generated:
+            prev_map[gen["filename"]] = gen["content"]
+
+        final_files = [{"filename": fn, "content": ct} for fn, ct in prev_map.items()]
+        return {"generated_files": final_files}
 
     # ── Metodos privados ──────────────────────────────────────────────────────
 
@@ -107,6 +152,7 @@ STRICT RULES:
         plan: dict,
         file_spec: dict,
         already_generated: list[dict],
+        review_issues: list[str] | None = None,
     ) -> str:
         """
         Gera o conteudo de um unico arquivo via tool loop.
@@ -116,21 +162,30 @@ STRICT RULES:
         iteracao com os resultados das ferramentas.
 
         Args:
-            plan            : Plano completo do projeto.
-            file_spec       : Especificacao do arquivo a gerar.
-            already_generated: Arquivos ja gerados nesta execucao.
+            plan             : Plano completo do projeto.
+            file_spec        : Especificacao do arquivo a gerar.
+            already_generated: Arquivos ja gerados/disponiveis como contexto.
+            review_issues    : Lista de problemas apontados pelo Reviewer para
+                               este arquivo (modo correcao). None na primeira geracao.
 
         Returns:
             Conteudo do arquivo como string pura.
         """
         context = self._build_context(plan, file_spec, already_generated)
 
+        # Secao de feedback do Reviewer — so aparece no modo correcao
+        feedback_section = ""
+        if review_issues:
+            feedback_section = "\nREVIEWER FEEDBACK -- fix ALL of these issues:\n"
+            feedback_section += "\n".join(f"  - {issue}" for issue in review_issues)
+            feedback_section += "\n"
+
         user_prompt = f"""PROJECT OVERVIEW:
 Objective: {plan['objective']}
 Architecture notes: {plan['notes']}
 
 {context}
-
+{feedback_section}
 YOUR TASK:
 Implement the file: {file_spec['filename']}
 Responsibility: {file_spec['description']}

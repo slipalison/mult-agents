@@ -1,6 +1,6 @@
 # Sistema de Agentes LangGraph + Ollama
 
-Sistema didático de dois agentes de IA que conversam entre si para transformar
+Sistema didático de três agentes de IA que conversam entre si para transformar
 uma demanda em linguagem natural em arquivos de código prontos no disco.
 
 ---
@@ -29,10 +29,11 @@ Você digita uma demanda como:
 crie uma API REST com Flask que gerencia uma lista de tarefas
 ```
 
-O sistema executa dois agentes locais em sequência:
+O sistema executa três agentes locais em sequência (com loop de correção):
 
 1. **PlannerAgent** — entende a demanda e decide *quais arquivos* precisam existir e *o que cada um deve conter*
 2. **CoderAgent** — recebe esse plano e *implementa* cada arquivo, um por vez
+3. **ReviewerAgent** — lê o plano e o código gerado, verifica a conformidade e devolve ao Coder se encontrar problemas — repete até tudo estar aprovado ou atingir o limite de iterações
 
 Ao final, os arquivos gerados são salvos na pasta `output/`.
 
@@ -43,27 +44,34 @@ Tudo roda 100% local via **Ollama** — sem nenhuma chamada a APIs externas.
 ## Como funciona — visão geral
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        LANGGRAPH                                │
-│                                                                 │
-│   ┌───────┐      ┌──────────────────┐      ┌───────────────┐   │
-│   │ START │─────▶│  PlannerAgent    │─────▶│  CoderAgent   │   │
-│   └───────┘      │  qwen3.5:9b      │      │  qwen2.5-     │   │
-│                  │                  │      │  coder:7b     │   │
-│                  │  Lê: demand      │      │               │   │
-│                  │  Escreve: plan   │      │  Lê: plan     │   │
-│                  └──────────────────┘      │  Escreve:     │   │
-│                                            │  generated_   │   │
-│                                            │  files        │   │
-│                                            └───────┬───────┘   │
-│                                                    │           │
-└────────────────────────────────────────────────────┼───────────┘
-                                                     │
-                                                     ▼
-                                              ┌─────────────┐
-                                              │ FileWriter  │
-                                              │ output/     │
-                                              └─────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                              LANGGRAPH                                   │
+│                                                                          │
+│  ┌───────┐   ┌──────────────────┐   ┌───────────────┐                   │
+│  │ START │──▶│  PlannerAgent    │──▶│  CoderAgent   │◀──────────┐       │
+│  └───────┘   │  qwen3.5:9b      │   │  qwen2.5-     │           │       │
+│              │                  │   │  coder:7b     │      re-gera       │
+│              │  Lê: demand      │   │               │      arquivos      │
+│              │  Escreve: plan   │   │  Lê: plan     │    reprovados      │
+│              └──────────────────┘   │  Escreve:     │           │       │
+│                                     │  generated_   │           │       │
+│                                     │  files        │           │       │
+│                                     └───────┬───────┘           │       │
+│                                             │                   │       │
+│                                             ▼                   │       │
+│                                     ┌───────────────┐           │       │
+│                                     │ ReviewerAgent │───issues──┘       │
+│                                     │ qwen3.5:9b    │                   │
+│                                     │               │──── ok ───▶ END   │
+│                                     └───────────────┘                   │
+└──────────────────────────────────────────────────────────────────────────┘
+                            (apos END)
+                                 │
+                                 ▼
+                          ┌─────────────┐
+                          │ FileWriter  │
+                          │ output/     │
+                          └─────────────┘
 ```
 
 ### O que cada parte faz
@@ -72,7 +80,8 @@ Tudo roda 100% local via **Ollama** — sem nenhuma chamada a APIs externas.
 |------------|-----------------|---------------|
 | `main.py` | Lê a demanda, inicia o grafo, chama FileWriter | Grafo + FileWriter |
 | `PlannerAgent` | Produz um plano JSON (lista de arquivos) | LLM qwen3.5:9b |
-| `CoderAgent` | Gera o código de cada arquivo do plano | LLM qwen2.5-coder:7b |
+| `CoderAgent` | Gera o código de cada arquivo; em modo correção, re-gera só os reprovados com feedback do Reviewer | LLM qwen2.5-coder:7b |
+| `ReviewerAgent` | Verifica se cada arquivo cumpre o plano; reprova e devolve ao Coder se necessário | LLM qwen3.5:9b |
 | `FileWriter` | Salva os arquivos gerados no disco | Sistema de arquivos |
 | `GraphState` | Estado compartilhado — todos os nós lêem e escrevem aqui | — |
 
@@ -94,6 +103,8 @@ class GraphState(TypedDict):
     demand: str                                           # entrada do usuário
     plan: Optional[dict]                                  # saída do Planner
     generated_files: list[dict]                           # saída do Coder
+    review: Optional[dict]                                # saída do Reviewer
+    review_iterations: int                                # contador do loop coder↔reviewer
     messages: Annotated[list[BaseMessage], add_messages]  # histórico LLM
 ```
 
@@ -115,12 +126,22 @@ O LangGraph faz o **merge** do retorno com o estado existente automaticamente.
 
 ### Arestas
 
-Definem a ordem de execução. Neste projeto é um fluxo linear:
+Definem a ordem de execução. Arestas podem ser fixas ou condicionais:
 
 ```python
-graph.add_edge(START, "planner")   # começa no planner
-graph.add_edge("planner", "coder") # planner termina → coder começa
-graph.add_edge("coder", END)       # coder termina → fim
+# Arestas fixas
+graph.add_edge(START,     "planner")   # começa no planner
+graph.add_edge("planner", "coder")     # planner termina → coder começa
+graph.add_edge("coder",   "reviewer")  # coder termina → reviewer avalia
+
+# Aresta condicional: reviewer decide o próximo nó
+graph.add_conditional_edges(
+    "reviewer",
+    _route_after_review,               # função que inspeciona o estado
+    {"coder": "coder", END: END},      # mapa de destinos possíveis
+)
+# _route_after_review retorna "coder" se há problemas e ainda há iterações,
+# ou END se está tudo ok ou o limite foi atingido
 ```
 
 ### Por que LangGraph?
@@ -142,7 +163,8 @@ velocidade de iteração importa mais do que perfeição.
 |--------|--------|------|---------------|
 | Planner | `qwen3.5:9b` | ~6.6 GB | Família Qwen3.5 tem raciocínio encadeado integrado (`<think>`). Confiável para gerar JSON estruturado. |
 | Coder | `qwen2.5-coder:7b` | ~4.7 GB | Fine-tuned especificamente para código. Supera modelos gerais maiores em geração de código. |
-| **Total** | | **~11 GB** | Ambos cabem simultaneamente na RTX 4090 (24 GB) |
+| Reviewer | `qwen3.5:9b` | — | Mesmo modelo do Planner — bom para raciocínio analítico e saída JSON. Compartilha VRAM já alocada. |
+| **Total** | | **~11 GB** | Os três cabem simultaneamente na RTX 4090 (24 GB) |
 
 ### Quer modelos mais potentes?
 
@@ -151,8 +173,10 @@ Edite apenas `src/config.py`:
 ```python
 @dataclass(frozen=True)
 class Config:
-    planner_model: str = "qwen3.5:27b"       # mais lento, mais preciso
-    coder_model:   str = "qwen2.5-coder:32b" # mais lento, código melhor
+    planner_model:        str = "qwen3.5:27b"       # mais lento, mais preciso
+    coder_model:          str = "qwen2.5-coder:32b" # mais lento, código melhor
+    reviewer_model:       str = "qwen3.5:27b"       # idem
+    max_review_iterations: int = 3                  # ajuste o loop aqui
 ```
 
 Nenhum outro arquivo precisa ser alterado.
@@ -170,6 +194,7 @@ Nenhum outro arquivo precisa ser alterado.
 ```bash
 ollama pull qwen3.5:9b
 ollama pull qwen2.5-coder:7b
+# qwen3.5:9b é reutilizado pelo Reviewer — não precisa de pull extra
 ```
 
 ### Dependências Python
@@ -244,19 +269,21 @@ like_claude/
 │
 ├── main.py                    # Ponto de entrada — orquestra tudo
 ├── requirements.txt
+├── MAPA.md                    # Mapa rapido de arquivos e responsabilidades
 │
 ├── src/
-│   ├── config.py              # Configuracao central (modelos, paths)
+│   ├── config.py              # Configuracao central (modelos, paths, limites)
 │   ├── utils.py               # Helpers: extract_json(), extract_code()
 │   │
 │   ├── agents/
 │   │   ├── base.py            # BaseAgent(ABC) — contrato comum
 │   │   ├── planner.py         # PlannerAgent — analisa demanda, cria plano
-│   │   └── coder.py           # CoderAgent — implementa arquivos do plano
+│   │   ├── coder.py           # CoderAgent — implementa/corrige arquivos do plano
+│   │   └── reviewer.py        # ReviewerAgent — verifica conformidade, devolve ao Coder se necessario
 │   │
 │   ├── graph/
 │   │   ├── state.py           # GraphState(TypedDict) — estado do grafo
-│   │   └── builder.py         # build_graph() — monta a topologia
+│   │   └── builder.py         # build_graph() — monta a topologia com aresta condicional
 │   │
 │   ├── tools/
 │   │   ├── file_reader.py     # Tools LangChain: list_directory, read_file
@@ -321,7 +348,9 @@ Responsabilidade única: **planejar**. Não sabe que o Coder existe.
 
 ### `src/agents/coder.py`
 
-Para cada arquivo no plano, executa um **tool loop**:
+Opera em dois modos dependendo do estado recebido:
+
+**Modo normal** (primeira execução — sem `review` no estado):
 
 ```
 1. Monta prompt (plano + contexto)
@@ -335,14 +364,11 @@ Para cada arquivo no plano, executa um **tool loop**:
 3. Extrai e retorna o código
 ```
 
-O LLM decide **autonomamente** se precisa ler algum arquivo antes de escrever.
-Quando o demanda faz referência a código existente (ex: "estenda o arquivo X"),
-o modelo chama `read_file` para inspecioná-lo antes de gerar o novo arquivo.
-
-Retorna:
-```python
-{"generated_files": [{"filename": "...", "content": "..."}, ...]}
-```
+**Modo correção** (chamado pelo loop — `review.status == "issues_found"`):
+- Re-gera **apenas** os arquivos com `status != "ok"` no review
+- Injeta o feedback do Reviewer no prompt de cada arquivo reprovado (`REVIEWER FEEDBACK -- fix ALL of these issues`)
+- Mantém os arquivos aprovados intactos
+- Retorna a lista completa mesclada (aprovados + corrigidos)
 
 Responsabilidade única: **codificar**. Não sabe nada de planejamento ou disco.
 
@@ -378,7 +404,9 @@ completo e retorna apenas o que modificou.
 
 ### `src/graph/builder.py`
 
-Monta a topologia `START → planner → coder → END` e compila o grafo.
+Monta a topologia `START → planner → coder ⇄ reviewer → END` e compila o grafo.
+Contém a função `_route_after_review` que decide, após cada revisão, se volta ao
+Coder (problemas encontrados + iterações disponíveis) ou encerra (aprovado ou limite atingido).
 Para adicionar nós, edite **apenas este arquivo**.
 
 ### `src/tools/file_writer.py`
@@ -390,137 +418,99 @@ agentes geram conteúdo, `FileWriter` persiste — são responsabilidades distin
 
 ## Como adicionar um novo agente
 
-Este é o passo a passo completo para adicionar, por exemplo, um **ReviewerAgent**
-que lê o código gerado e sugere melhorias.
+Este é o passo a passo completo para adicionar, por exemplo, um **DocWriterAgent**
+que gera um `README.md` automático para o projeto criado.
 
-### Passo 1 — Crie o agente em `src/agents/reviewer.py`
+### Passo 1 — Crie o agente em `src/agents/doc_writer.py`
 
 Extenda `BaseAgent` e implemente `run()`. Nenhum outro arquivo existente
 precisa ser tocado nesta etapa.
 
 ```python
-# src/agents/reviewer.py
+# src/agents/doc_writer.py
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from src.agents.base import BaseAgent
 from src.config import config
+from src.console import print_agent, print_separator, spinner
+from src.utils import extract_code
 
 
-class ReviewerAgent(BaseAgent):
+class DocWriterAgent(BaseAgent):
     """
-    Lê os arquivos gerados e retorna sugestões de melhoria.
-    SRP: apenas revisa, não planeja nem codifica.
+    Gera documentacao (README.md) a partir do plano e dos arquivos gerados.
+    SRP: apenas documenta, nao planeja nem codifica.
     """
 
     SYSTEM_PROMPT = """/no_think
-You are a senior code reviewer. Analyze the provided code and return a JSON review.
-
-JSON FORMAT:
-{
-  "approved": true,
-  "suggestions": ["suggestion 1", "suggestion 2"]
-}"""
+You are a technical writer. Generate a clear README.md for the project.
+Output ONLY the raw markdown content, no extra text."""
 
     def __init__(self):
-        # Pode reutilizar qualquer modelo — até um diferente dos outros
         super().__init__(model=config.planner_model)
 
     def run(self, state: dict) -> dict:
-        generated = state["generated_files"]
+        plan       = state["plan"]
+        gen_files  = state["generated_files"]
 
-        # Monta um resumo de todos os arquivos para revisar
-        code_summary = "\n\n".join(
-            f"--- {f['filename']} ---\n{f['content']}"
-            for f in generated
-        )
+        files_list = "\n".join(f"- {f['filename']}" for f in gen_files)
 
-        messages = [
-            SystemMessage(content=self.SYSTEM_PROMPT),
-            HumanMessage(content=f"Review this code:\n\n{code_summary}"),
-        ]
+        print_separator("DOC WRITER")
 
-        response = self.llm.invoke(messages)
+        with spinner("writer", "Gerando README.md") as s:
+            response = self.llm.invoke([
+                SystemMessage(content=self.SYSTEM_PROMPT),
+                HumanMessage(content=f"Project: {plan['objective']}\nFiles:\n{files_list}"),
+            ])
 
-        # Importe extract_json do utils para parsear a resposta
-        from src.utils import extract_json
-        review = extract_json(response.content)
+        doc = extract_code(response.content)
+        print_agent("writer", f"README.md gerado  ({s.elapsed_str()})")
 
-        print(f"  [Reviewer] Aprovado: {review.get('approved')}")
-        for s in review.get("suggestions", []):
-            print(f"    - {s}")
-
-        # Retorna uma nova chave no estado — não interfere com as existentes
-        return {"review": review}
+        # Retorna uma nova chave — nao interfere com as existentes
+        return {"documentation": doc}
 ```
 
-### Passo 2 — Adicione `review` ao `GraphState`
-
-Abra `src/graph/state.py` e adicione o novo campo:
+### Passo 2 — Adicione `documentation` ao `GraphState`
 
 ```python
 class GraphState(TypedDict):
     demand: str
     plan: Optional[dict]
     generated_files: list[dict]
-    review: Optional[dict]                               # <- NOVO
+    review: Optional[dict]
+    review_iterations: int
+    documentation: Optional[str]                          # <- NOVO
     messages: Annotated[list[BaseMessage], add_messages]
 ```
 
 ### Passo 3 — Conecte o nó no grafo
 
-Abra `src/graph/builder.py`. Importe o agente e adicione o nó + arestas:
-
 ```python
-from src.agents.reviewer import ReviewerAgent   # <- NOVO
+from src.agents.doc_writer import DocWriterAgent   # <- NOVO
 
 def build_graph():
-    planner  = PlannerAgent()
-    coder    = CoderAgent()
-    reviewer = ReviewerAgent()                  # <- NOVO
+    planner    = PlannerAgent()
+    coder      = CoderAgent()
+    reviewer   = ReviewerAgent()
+    doc_writer = DocWriterAgent()                  # <- NOVO
 
-    graph = StateGraph(GraphState)
+    graph.add_node("doc_writer", doc_writer.run)   # <- NOVO
 
-    graph.add_node("planner",  planner.run)
-    graph.add_node("coder",    coder.run)
-    graph.add_node("reviewer", reviewer.run)    # <- NOVO
-
-    graph.add_edge(START,      "planner")
-    graph.add_edge("planner",  "coder")
-    graph.add_edge("coder",    "reviewer")      # <- NOVO
-    graph.add_edge("reviewer", END)             # <- mudou de "coder" para "reviewer"
-
-    return graph.compile()
+    # Aresta após o reviewer aprovar vai para doc_writer antes do END
+    # (ajuste _route_after_review para retornar "doc_writer" em vez de END)
 ```
 
-Novo fluxo:
-```
-START → planner → coder → reviewer → END
-```
+### Resumo do que é tocado
 
-### Passo 4 — Use o resultado em `main.py` (opcional)
-
-Se quiser exibir o review no terminal, adicione em `main.py`:
-
-```python
-review = result.get("review", {})
-if review.get("suggestions"):
-    print("\n[REVIEW] Sugestoes:")
-    for s in review["suggestions"]:
-        print(f"  - {s}")
-```
-
-### Resumo do que foi tocado
-
-| Arquivo | O que mudou |
+| Arquivo | O que muda |
 |---------|------------|
-| `src/agents/reviewer.py` | **Criado** — nova subclasse de `BaseAgent` |
-| `src/graph/state.py` | Adicionado campo `review` |
-| `src/graph/builder.py` | Adicionado nó + arestas |
-| `main.py` | Leitura opcional do review (cosmético) |
-| `planner.py`, `coder.py`, `base.py`, `utils.py` | **Nada mudou** |
+| `src/agents/doc_writer.py` | **Criado** — nova subclasse de `BaseAgent` |
+| `src/graph/state.py` | Adicionar campo `documentation` |
+| `src/graph/builder.py` | Adicionar nó + aresta |
+| `planner.py`, `coder.py`, `reviewer.py`, `base.py` | **Nada muda** |
 
-Isso é o princípio **Open/Closed** na prática: o sistema foi estendido
-sem modificar o que já funcionava.
+Isso é o princípio **Open/Closed** na prática: o sistema é estendido
+sem modificar o que já funciona.
 
 ---
 
@@ -538,8 +528,10 @@ sem modificar o que já funcionava.
 
 ### KISS (Keep It Simple)
 
-O grafo é linear: `START → planner → coder → END`. Sem condicionais, sem
-loops, sem retry logic. Se algo falha, o erro aparece claramente.
+O grafo tem um fluxo claro: `START → planner → coder ⇄ reviewer → END`.
+O único ponto de decisão é a aresta condicional do Reviewer — uma função
+de 3 linhas (`_route_after_review`) que inspeciona duas chaves do estado.
+Se algo falha, o erro aparece claramente sem lógica oculta.
 
 ### DRY (Don't Repeat Yourself)
 
@@ -629,17 +621,19 @@ print_separator("NOME DA SECAO")
 |--------|-----|
 | planner | cyan |
 | coder | green |
+| reviewer | magenta |
 | writer | yellow |
 | system | white |
 
-Para um novo agente, adicione a entrada em `AGENT_COLOR` em `src/console.py`:
+Para adicionar um novo agente, inclua a entrada em `AGENT_COLOR` em `src/console.py`:
 
 ```python
 AGENT_COLOR: dict[str, str] = {
     "planner":  "cyan",
     "coder":    "green",
+    "reviewer": "magenta",
     "writer":   "yellow",
-    "reviewer": "magenta",   # <- novo agente
+    "novo":     "blue",    # <- novo agente
 }
 ```
 
@@ -652,12 +646,18 @@ main.py
   ├── src/config.py
   ├── src/console.py
   ├── src/graph/builder.py
+  │     ├── src/config.py
   │     ├── src/graph/state.py
   │     ├── src/agents/planner.py
   │     │     ├── src/agents/base.py  ──>  langchain_ollama.ChatOllama
   │     │     ├── src/console.py
   │     │     └── src/utils.py
-  │     └── src/agents/coder.py
+  │     ├── src/agents/coder.py
+  │     │     ├── src/agents/base.py
+  │     │     ├── src/console.py
+  │     │     ├── src/utils.py
+  │     │     └── src/tools/file_reader.py
+  │     └── src/agents/reviewer.py
   │           ├── src/agents/base.py
   │           ├── src/console.py
   │           └── src/utils.py
